@@ -13,7 +13,7 @@ HEADERS = {
     )
 }
 
-# Termos neutros e irrelevantes para filtrar
+# Stopwords (palavras a serem ignoradas na contagem)
 STOPWORDS = set(
     [
         "de",
@@ -84,7 +84,6 @@ def obter_links_materias():
 
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
-            # Garante que pega apenas matérias dentro de /entretenimento/
             if "jovempan.com.br/entretenimento/" in href and href.strip(
                 "/"
             ) != URL_ENTRETENIMENTO.strip("/"):
@@ -94,7 +93,7 @@ def obter_links_materias():
             if len(links) >= 15:
                 break
     except Exception as e:
-        print(f"Erro ao capturar links de entretenimento: {e}")
+        print(f"Erro ao capturar links: {e}")
     return list(links)
 
 
@@ -126,4 +125,4 @@ if __name__ == "__main__":
     with open("palavras.json", "w", encoding="utf-8") as f:
         json.dump(palavras_chave, f, ensure_ascii=False)
 
-    print("Palavras atualizadas:", palavras_chave)
+    print("Palavras atualizadas com sucesso:", palavras_chave)
