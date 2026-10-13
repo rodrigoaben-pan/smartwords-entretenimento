@@ -3,13 +3,18 @@ import json
 import re
 import unicodedata
 from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
+# CONFIGURACOES
 URL_ENTRETENIMENTO = "https://jovempan.com.br/entretenimento/"
-MAX_MATERIAS = 15
+MAX_MATERIAS = 30
+MAX_PAGINAS_BUSCA = 8
+MIN_CANDIDATOS = MAX_MATERIAS + 20
+FUSO_BRASIL = timezone(timedelta(hours=-3))
 
 HEADERS = {
     "User-Agent": (
@@ -19,115 +24,194 @@ HEADERS = {
     )
 }
 
-# Palavras irrelevantes para o ranking
+# Palavras ignoradas na contagem
 STOPWORDS = set("""
 a ao aos as o os um uma uns umas de da das do dos e em
 no na nos nas num numa para por pelo pela pelos pelas
 com sem que quem qual quais quando onde como porque
-porém mas ou se sua suas seu seus meu minha meus minhas
+porem mas ou se sua suas seu seus meu minha meus minhas
 isso isto esse essa esses essas este esta estes estas
-aquele aquela é são foi foram ser sendo sido era eram
-estar está estão estava estavam tem têm tinha tinham
-ter há houve haver pode podem poderia poderiam vai vão
-ir vem vêm veio fazer feito fez faz dizer diz disse
-disseram segundo sobre entre após antes durante desde
-até ainda também já mais menos muito muita muitos muitas
+aquele aquela e sao foi foram ser sendo sido era eram
+estar esta estao estava estavam tem tinha tinham
+ter ha houve haver pode podem poderia poderiam vai vao
+ir vem veio fazer feito fez faz dizer diz disse
+disseram segundo sobre entre apos antes durante desde
+ate ainda tambem ja mais menos muito muita muitos muitas
 pouco pouca poucos poucas todo toda todos todas outro
 outra outros outras mesmo mesma mesmos mesmas cada algo
-alguém algum alguma alguns algumas tanto tanta tão
-apenas quase então assim agora hoje ontem amanhã ano
-anos mês meses dia dias vez vezes parte forma momento
+alguem algum alguma alguns algumas tanto tanta tao
+apenas quase entao assim agora hoje ontem amanha ano
+anos mes meses dia dias vez vezes parte forma momento
 primeiro primeira segundo segunda novo nova novos novas
-maior menor através além cerca diante enquanto depois
-neste nesta nesse nessa naquele aqui ali lá ele ela
-eles elas lhe lhes nós vocês você eu tu gente
-
-jovem pan entretenimento noticia notícias notícia
-matéria matérias foto fotos reprodução imagens imagem
-instagram facebook twitter vídeo vídeos news classicpan
-afiliadas rádio leia veja saiba confira site publicação
-publicado publicada redação conteúdo relacionados
-publicidade anúncio
+maior menor atraves alem cerca diante enquanto depois
+neste nesta nesse nessa naquele aqui ali la ele ela
+eles elas lhe lhes nos voces voce eu tu gente lado
+dois duas tres quatro pessoas
+jovem pan entretenimento noticia noticias materia materias
+foto fotos reproducao imagens imagem instagram facebook
+twitter video videos news classicpan afiliadas radio
+leia veja saiba confira site publicacao publicado publicada
+redacao conteudo relacionados publicidade anuncio
 """.split())
 
 
 def normalizar(palavra):
     return "".join(
-        letra
-        for letra in unicodedata.normalize("NFD", palavra)
-        if unicodedata.category(letra) != "Mn"
+        c for c in unicodedata.normalize("NFD", palavra)
+        if unicodedata.category(c) != "Mn"
     )
 
 
-STOPWORDS_NORMALIZADAS = {
-    normalizar(p) for p in STOPWORDS
-}
+STOPWORDS = {normalizar(p) for p in STOPWORDS}
 
 
+# IDENTIFICAR LINKS DE MATERIAS
+def limpar_url_materia(href):
+    url = urlparse(urljoin(URL_ENTRETENIMENTO, href))
+    partes = url.path.strip("/").split("/")
+
+    if url.netloc.lower() not in (
+        "jovempan.com.br",
+        "www.jovempan.com.br"
+    ):
+        return None
+
+    if len(partes) < 3 or partes[0] != "entretenimento":
+        return None
+
+    if any(
+        p in ("pagina", "page", "tag", "feed")
+        for p in partes[1:]
+    ):
+        return None
+
+    return (
+        "https://jovempan.com.br/"
+        + "/".join(partes)
+        + "/"
+    )
+
+
+# BUSCAR MATERIAS NAS PAGINAS DA EDITORIA
 def obter_links_materias(sessao):
-    resposta = sessao.get(
-        URL_ENTRETENIMENTO,
-        timeout=20
-    )
-    resposta.raise_for_status()
-
-    soup = BeautifulSoup(
-        resposta.content, "html.parser"
-    )
-
-    links = []
+    encontrados = []
     vistos = set()
 
-    for a in soup.select("a[href]"):
-        url = urljoin(
-            URL_ENTRETENIMENTO, a["href"]
-        )
-
-        parsed = urlparse(url)
-        partes = parsed.path.strip("/").split("/")
-
-        if parsed.netloc not in {
-            "jovempan.com.br",
-            "www.jovempan.com.br"
-        }:
-            continue
-
-        # Filtra links de matérias da editoria
-        if len(partes) < 3:
-            continue
-
-        if partes[0] != "entretenimento":
-            continue
-
-        if partes[1] in {
-            "pagina", "page", "tag", "feed"
-        }:
-            continue
-
+    for pagina in range(1, MAX_PAGINAS_BUSCA + 1):
         url = (
-            "https://jovempan.com.br"
-            + parsed.path.rstrip("/")
-            + "/"
+            URL_ENTRETENIMENTO if pagina == 1
+            else f"{URL_ENTRETENIMENTO}pagina/{pagina}/"
         )
 
-        if url not in vistos:
-            vistos.add(url)
-            links.append(url)
+        resposta = sessao.get(url, timeout=20)
+        resposta.raise_for_status()
 
-        if len(links) == MAX_MATERIAS:
+        soup = BeautifulSoup(
+            resposta.content, "html.parser"
+        )
+
+        area = soup.find("main") or soup
+        novos = 0
+
+        for a in area.select("a[href]"):
+            materia = limpar_url_materia(a["href"])
+
+            if materia and materia not in vistos:
+                vistos.add(materia)
+                encontrados.append(materia)
+                novos += 1
+
+        print(
+            f"Pagina {pagina}: {novos} links novos. "
+            f"Total: {len(encontrados)}"
+        )
+
+        if len(encontrados) >= MIN_CANDIDATOS:
             break
 
-    return links
+        if pagina > 1 and novos == 0:
+            break
+
+    if len(encontrados) < MAX_MATERIAS:
+        raise RuntimeError(
+            f"Encontrei apenas {len(encontrados)} links. "
+            "JSON anterior preservado."
+        )
+
+    return encontrados
 
 
-def extrair_texto_materia(html):
-    soup = BeautifulSoup(html, "html.parser")
+# CONVERTER DATA DE PUBLICACAO
+def converter_data(valor):
+    if not valor:
+        return None
 
-    # Uma matéria precisa ter título principal
-    if not soup.find("h1"):
-        return ""
+    try:
+        data = datetime.fromisoformat(
+            valor.strip().replace("Z", "+00:00")
+        )
 
-    # Procura o corpo editorial, não a página inteira
+        if data.tzinfo is None:
+            data = data.replace(tzinfo=FUSO_BRASIL)
+
+        return data.astimezone(timezone.utc)
+
+    except (ValueError, TypeError):
+        return None
+
+
+# EXTRAIR DATA DA MATERIA
+def extrair_data(soup):
+    seletores = (
+        'meta[property="article:published_time"]',
+        'meta[property="datePublished"]',
+        'meta[itemprop="datePublished"]',
+        'meta[name="datePublished"]',
+        'time[datetime]',
+    )
+
+    for seletor in seletores:
+        tag = soup.select_one(seletor)
+
+        if tag:
+            data = converter_data(
+                tag.get("content") or tag.get("datetime")
+            )
+
+            if data:
+                return data
+
+    # Alternativa: data escrita na pagina
+    texto = soup.get_text(" ", strip=True)
+
+    padrao = (
+        r"(\d{2})/(\d{2})/(\d{4})\s+"
+        r"[àa]s\s+(\d{1,2})[h:](\d{2})"
+    )
+
+    encontrado = re.search(
+        padrao, texto, flags=re.IGNORECASE
+    )
+
+    if encontrado:
+        dia, mes, ano, hora, minuto = map(
+            int, encontrado.groups()
+        )
+
+        try:
+            return datetime(
+                ano, mes, dia, hora, minuto,
+                tzinfo=FUSO_BRASIL
+            ).astimezone(timezone.utc)
+
+        except ValueError:
+            pass
+
+    return None
+
+
+# EXTRAIR APENAS O TEXTO EDITORIAL
+def extrair_texto_materia(soup):
     seletores = (
         '[itemprop="articleBody"]',
         ".entry-content",
@@ -142,28 +226,26 @@ def extrair_texto_materia(html):
         "main",
     )
 
+    lixo = (
+        "script, style, nav, aside, footer, header, form, "
+        "figcaption, button, [class*='related'], "
+        "[class*='share'], [class*='sidebar'], "
+        "[class*='recommend'], [class*='ads-'], "
+        "[class*='mais-lidas']"
+    )
+
     for seletor in seletores:
         for bloco in soup.select(seletor):
-            corpo = BeautifulSoup(
+            copia = BeautifulSoup(
                 str(bloco), "html.parser"
             )
 
-            # Remove componentes não editoriais
-            for descartavel in corpo.select(
-                "script, style, nav, aside, footer, "
-                "header, form, figcaption, button, "
-                "[class*='related'], "
-                "[class*='share'], "
-                "[class*='sidebar'], "
-                "[class*='recommend'], "
-                "[class*='ads-'], "
-                "[class*='mais-lidas']"
-            ):
-                descartavel.decompose()
+            for tag in copia.select(lixo):
+                tag.decompose()
 
             paragrafos = [
                 p.get_text(" ", strip=True)
-                for p in corpo.select("p")
+                for p in copia.select("p")
                 if len(
                     p.get_text(" ", strip=True)
                 ) >= 35
@@ -177,95 +259,122 @@ def extrair_texto_materia(html):
     return ""
 
 
-def analisar_palavras(sessao, urls):
-    contador = Counter()
+# ABRIR E VALIDAR CADA MATERIA
+def carregar_materia(sessao, url):
+    try:
+        resposta = sessao.get(url, timeout=20)
+        resposta.raise_for_status()
+
+        soup = BeautifulSoup(
+            resposta.content, "html.parser"
+        )
+
+        h1 = soup.find("h1")
+
+        if not h1:
+            return None
+
+        texto = extrair_texto_materia(soup)
+
+        if not texto:
+            return None
+
+        return {
+            "url": url,
+            "titulo": h1.get_text(" ", strip=True),
+            "data": extrair_data(soup),
+            "texto": texto,
+        }
+
+    except requests.RequestException as erro:
+        print(f"ERRO em {url}: {erro}")
+        return None
+
+
+# CONTAR TODAS AS PALAVRAS VALIDAS
+def analisar_palavras(materias):
+    frequencias = Counter()
     grafias = defaultdict(Counter)
-    lidas = 0
 
-    for url in urls:
-        try:
-            resposta = sessao.get(
-                url, timeout=20
-            )
-            resposta.raise_for_status()
+    for materia in materias:
+        palavras = re.findall(
+            r"[^\W\d_]{4,}",
+            materia["texto"].casefold()
+        )
 
-            texto = extrair_texto_materia(
-                resposta.content
-            )
+        for palavra in palavras:
+            chave = normalizar(palavra)
 
-            if not texto:
-                print(
-                    "IGNORADA (corpo não identificado):",
-                    url
-                )
-                continue
-
-            lidas += 1
-
-            print(
-                f"OK ({len(texto)} caracteres): {url}"
-            )
-
-            # Captura somente palavras com letras
-            # Ignora números e caracteres especiais
-            palavras = re.findall(
-                r"[^\W\d_]{4,}",
-                texto.casefold()
-            )
-
-            for palavra in palavras:
-                chave = normalizar(palavra)
-
-                if chave in STOPWORDS_NORMALIZADAS:
-                    continue
-
-                contador[chave] += 1
+            if chave not in STOPWORDS:
+                frequencias[chave] += 1
                 grafias[chave][palavra] += 1
 
-        except requests.RequestException as erro:
-            print(f"ERRO lendo {url}: {erro}")
-
-    # Protege o JSON de resultados inválidos
-    if lidas < 5:
-        raise RuntimeError(
-            f"Apenas {lidas} matérias válidas. "
-            "JSON anterior preservado."
-        )
-
-    palavras = [
+    # Todas as palavras, sem limite
+    return [
         grafias[chave].most_common(1)[0][0]
-        for chave, _ in contador.most_common()
+        for chave, _ in frequencias.most_common()
     ]
 
-    if len(palavras) < 8:
-        raise RuntimeError(
-            "Menos de 8 palavras encontradas. "
-            "JSON anterior preservado."
-        )
 
-    print("Matérias analisadas:", lidas)
-    print("Palavras selecionadas:", palavras)
-
-    return palavras
-
-
-if __name__ == "__main__":
+# EXECUCAO PRINCIPAL
+def main():
     with requests.Session() as sessao:
         sessao.headers.update(HEADERS)
 
         links = obter_links_materias(sessao)
 
-        if not links:
-            raise RuntimeError(
-                "Nenhum link de matéria identificado."
+        materias = []
+
+        for indice, url in enumerate(links, 1):
+            materia = carregar_materia(sessao, url)
+
+            if materia:
+                materias.append(materia)
+
+            print(
+                f"Lidas {indice}/{len(links)} | "
+                f"Validas: {len(materias)}"
             )
 
-        print("Links encontrados:", len(links))
-
-        palavras = analisar_palavras(
-            sessao, links
+    if len(materias) < MAX_MATERIAS:
+        raise RuntimeError(
+            f"Apenas {len(materias)} materias validas. "
+            "JSON anterior preservado."
         )
 
+    # Ordena por data de publicacao
+    data_minima = datetime.min.replace(
+        tzinfo=timezone.utc
+    )
+
+    materias.sort(
+        key=lambda m: m["data"] or data_minima,
+        reverse=True
+    )
+
+    # Escolhe as 30 mais recentes
+    selecionadas = materias[:MAX_MATERIAS]
+
+    print("30 materias selecionadas:")
+
+    for numero, materia in enumerate(
+        selecionadas, 1
+    ):
+        print(
+            f"{numero:02d}. "
+            f"{materia['data']} | "
+            f"{materia['titulo']}"
+        )
+
+    palavras = analisar_palavras(selecionadas)
+
+    if not palavras:
+        raise RuntimeError(
+            "Nenhuma palavra valida. "
+            "JSON anterior preservado."
+        )
+
+    # ATUALIZAR JSON
     with open(
         "palavras.json", "w", encoding="utf-8"
     ) as arquivo:
@@ -277,4 +386,11 @@ if __name__ == "__main__":
         )
         arquivo.write("\n")
 
-    print("JSON atualizado com sucesso!")
+    print(
+        f"Sucesso: {len(selecionadas)} materias, "
+        f"{len(palavras)} palavras distintas."
+    )
+
+
+if __name__ == "__main__":
+    main()
