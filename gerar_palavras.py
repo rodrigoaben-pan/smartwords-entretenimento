@@ -234,7 +234,7 @@ def analisar_palavras(sessao, urls):
 
     palavras = [
         grafias[chave].most_common(1)[0][0]
-        for chave, _ in contador.most_common(8)
+        for chave, _ in contador.most_common()
     ]
 
     if len(palavras) < 8:
